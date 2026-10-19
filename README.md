@@ -1,4 +1,4 @@
-# 广东电力 USBKey 助手
+# USBKey 助手
 
 适用于 Apple 芯片 Mac（macOS 12 及以上）的 USBKey 助手。
 
