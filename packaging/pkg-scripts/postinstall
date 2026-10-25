@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+APP_NAME="广东电力USBKey助手"
+LABEL="cn.gdpower.usbkeyassistant"
+CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)
+
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
+  exit 0
+fi
+
+USER_UID=$(/usr/bin/id -u "$CONSOLE_USER")
+USER_GROUP=$(/usr/bin/id -gn "$CONSOLE_USER")
+USER_HOME=$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | /usr/bin/awk '{print $2}')
+DATA_DIR="$USER_HOME/Library/Application Support/$APP_NAME"
+TLS_DIR="$DATA_DIR/tls"
+LOG_DIR="$USER_HOME/Library/Logs/$APP_NAME"
+AGENT_DIR="$USER_HOME/Library/LaunchAgents"
+AGENT_PATH="$AGENT_DIR/$LABEL.plist"
+
+# Remove the login item created by older package versions. The assistant is
+# intentionally started by the user and exits together with its USBKey bridge.
+/bin/launchctl bootout "gui/$USER_UID/$LABEL" 2>/dev/null || true
+/bin/rm -f "$AGENT_PATH"
+
+/bin/mkdir -p "$TLS_DIR" "$LOG_DIR"
+
+if [ ! -s "$TLS_DIR/localhost.crt" ] || [ ! -s "$TLS_DIR/localhost.key" ]; then
+  /usr/bin/openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -keyout "$TLS_DIR/localhost.key" \
+    -out "$TLS_DIR/localhost.crt" \
+    -days 3650 \
+    -subj "/CN=127.0.0.1" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
+    -addext "keyUsage=digitalSignature,keyEncipherment" \
+    -addext "extendedKeyUsage=serverAuth"
+fi
+
+/bin/chmod 600 "$TLS_DIR/localhost.key"
+/bin/chmod 644 "$TLS_DIR/localhost.crt"
+/usr/sbin/chown -R "$CONSOLE_USER:$USER_GROUP" "$DATA_DIR" "$LOG_DIR"
+
+# The leaf certificate is unique to this Mac/user and is trusted only for the
+# local loopback HTTPS endpoint required by the target website.
+# Upgrades keep the existing certificate and its trust settings. Reapplying
+# system trust from a noninteractive installer can fail even with root access.
+if ! /usr/bin/security verify-cert -c "$TLS_DIR/localhost.crt" \
+  -p ssl -s localhost >/dev/null 2>&1; then
+  /usr/bin/security add-trusted-cert -d -r trustRoot \
+    -k /Library/Keychains/System.keychain "$TLS_DIR/localhost.crt"
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+/bin/sh "$SCRIPT_DIR/sync-desktop-entry.sh" \
+  "/Applications/$APP_NAME.app" "$USER_HOME/Desktop/$APP_NAME.app"
+if [ -L "$USER_HOME/Desktop/$APP_NAME.app" ] && \
+   [ "$(/usr/bin/readlink "$USER_HOME/Desktop/$APP_NAME.app")" = "/Applications/$APP_NAME.app" ]; then
+  /usr/sbin/chown -h "$CONSOLE_USER:$USER_GROUP" "$USER_HOME/Desktop/$APP_NAME.app"
+fi
+
+exit 0

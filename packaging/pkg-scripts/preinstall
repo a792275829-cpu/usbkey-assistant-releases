@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+APP_PATH="/Applications/广东电力USBKey助手.app"
+CONSOLE_USER=$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)
+
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ] && [ "$CONSOLE_USER" != "loginwindow" ]; then
+  USER_UID=$(/usr/bin/id -u "$CONSOLE_USER")
+  USER_HOME=$(/usr/bin/dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | /usr/bin/awk '{print $2}')
+  DESKTOP_APP="$USER_HOME/Desktop/广东电力USBKey助手.app"
+  # Match literal paths so a different application is never stopped by a regex.
+  /bin/ps -axo pid=,command= | while read -r PROCESS_ID PROCESS_COMMAND; do
+    case "$PROCESS_COMMAND" in
+      "$DESKTOP_APP/Contents/MacOS/GDPowerUSBKeyAssistant"|"$DESKTOP_APP/Contents/MacOS/GDPowerUSBKeyAssistant "*|\
+      "$DESKTOP_APP/Contents/Resources/runtime/arm64/node $DESKTOP_APP/Contents/Resources/server/netca_readonly_bridge.mjs "*|\
+      "$DESKTOP_APP/Contents/Resources/bin/usbkey-transport "*|"$DESKTOP_APP/Contents/Resources/bin/usbkey-worker "*)
+        /bin/kill -TERM "$PROCESS_ID" 2>/dev/null || true
+        ;;
+    esac
+  done
+  /bin/launchctl bootout "gui/$USER_UID/cn.gdpower.usbkeyassistant" 2>/dev/null || true
+fi
+
+/usr/bin/pkill -f "$APP_PATH/Contents/MacOS/GDPowerUSBKeyAssistant" 2>/dev/null || true
+/usr/bin/pkill -f "$APP_PATH/Contents/Resources/server/netca_readonly_bridge.mjs" 2>/dev/null || true
+/usr/bin/pkill -f "$APP_PATH/Contents/Resources/bin/usbkey-transport" 2>/dev/null || true
+/usr/bin/pkill -f "$APP_PATH/Contents/Resources/bin/usbkey-worker" 2>/dev/null || true
+exit 0

@@ -1,0 +1,30 @@
+[package]
+name = "usbkey-transport"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "usbkey-worker"
+path = "src/worker_main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+futures-util = "0.3"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+zeroize = "1"
+tokio = { version = "1", features = ["full"] }
+openssl = { version = "0.10", features = ["vendored"] }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

@@ -1,0 +1,4 @@
+{
+  "type": "{\"UIFlag\":\"default\", \"InValidity\":true,\"Type\":\"signature\", \"Method\":\"device\",\"Value\":\"any\"}",
+  "condition": "IssuerCN~'NETCA' && InValidity='True' && CertType='Signature'"
+}

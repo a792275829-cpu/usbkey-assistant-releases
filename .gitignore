@@ -1,0 +1,16 @@
+# Build output
+/build/
+/dist/
+rust-transport/target/
+
+# Local development state
+/.local/
+.local/
+.DS_Store
+.workbuddy/
+
+# Reverse-engineering evidence and vendor extracts stay on the machine: they are
+# gigabytes of extracted Windows binaries and installer payloads. Only the 60 KB
+# trust store the build embeds is committed, under vendor/netca/.
+/work/*
+!/work/README.md
