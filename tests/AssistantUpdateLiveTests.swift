@@ -15,7 +15,10 @@ enum AssistantUpdateLiveTests {
             if case .failure(let error) = result { failure = error }
             checked = true
         }
-        updater.download(release, progress: { fraction in
+        guard let asset = release.installer else {
+            fatalError("Public release has no supported installer asset")
+        }
+        updater.download(asset, progress: { fraction in
             precondition((0...1).contains(fraction))
             progressSeen = true
             let step = Int(fraction * 10)
