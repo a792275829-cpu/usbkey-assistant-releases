@@ -120,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     DispatchQueue.main.async {
                         do {
                             try UpdateInstaller.relaunchAfterExit(destination)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { AssistantUpdateWindow.terminateForRelaunch() }
                         } catch {
                             self.showUpdateMessage("无法重新启动", detail: error.localizedDescription)
                         }

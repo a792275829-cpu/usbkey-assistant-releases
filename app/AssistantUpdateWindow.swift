@@ -177,11 +177,29 @@ final class AssistantUpdateWindow: NSWindowController {
         status.stringValue = "已安装 v\(plan.version)，正在重新启动。"
         do {
             try UpdateInstaller.relaunchAfterExit(target)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { NSApp.terminate(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { Self.terminateForRelaunch() }
         } catch {
             fail(error)
         }
     }
+
+    /// AppKit ignores terminate while a sheet is attached. End the update
+    /// sheet first, then allow the ordinary application termination cleanup.
+    static func terminateForRelaunch() {
+        for window in NSApp.windows {
+            if let sheet = window.attachedSheet {
+                window.endSheet(sheet)
+                sheet.orderOut(nil)
+            }
+        }
+        NSApp.terminate(nil)
+    }
+
+    #if ASSISTANT_UI_TEST
+    func finishForTesting(_ plan: UpdatePlan, target: URL) {
+        finish(plan, target: target)
+    }
+    #endif
 
     private func fail(_ error: Error) {
         working = false

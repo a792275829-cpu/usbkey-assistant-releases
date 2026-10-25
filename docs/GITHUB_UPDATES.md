@@ -32,7 +32,7 @@ v1.1.20 起，只要安装目录可写，旧 PKG 的 root 所有应用也直接�
 4. 重新签名：对暂存副本执行 adhoc `codesign --force --deep --sign -`，并 `codesign --verify` 复核。
 5. 替换：把暂存副本换成当前正在运行的应用（`Bundle.main.bundleURL`，通常是“应用程序”里的安装）；从只读副本运行时直接安装新版到可写的“应用程序”目录。
 6. 复核版本：读取替换后 `Info.plist` 的版本号，与发布版本不一致即报错。
-7. 自动重启：确认独立重启进程已启动，再退出当前进程；辅助进程等待旧进程退出后，以新实例打开安装好的新版。
+7. 自动重启：确认独立重启进程已启动，结束附属更新弹窗，再退出当前进程；辅助进程等待旧进程退出后，以新实例打开安装好的新版。v1.1.21 修复了未结束弹窗导致 AppKit 忽略退出、辅助进程持续等待的问题。
 
 解压、挂载、校验和签名都在授权之前以普通用户身份完成；替换脚本只做 `ditto` + 两次 `mv`，中断时回滚旧版本。
 
@@ -98,3 +98,5 @@ gh api repos/a792275829-cpu/usbkey-assistant-releases/releases/latest > build/la
 xcrun swiftc app/AssistantUpdate.swift tests/AssistantUpdateLiveTests.swift -parse-as-library -o build/assistant-update-live-tests
 ./build/assistant-update-live-tests "$PWD/build/latest-release.json"
 ```
+
+`make test-assistant-restart` 使用真实 AppKit 更新弹窗复现旧退出逻辑卡住，再调用生产更新完成逻辑，验证旧进程退出以及 LaunchServices 自动打开临时测试应用。测试应用只记录启动标记，不启动硬件服务，也不修改已安装应用。

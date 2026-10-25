@@ -2,7 +2,7 @@
 
 macOS 原生 USBKey 助手，提供设备与证书状态、网页登录桥接、硬件签名、数字信封加解密，以及应用内更新。
 
-当前版本为 **1.1.20**，应用后端已完整迁到 Rust。应用运行及应用包构建不再需要 Node.js，也不携带 JavaScript 服务文件；Swift 界面、系统钥匙串和既有 C 硬件协议保留。已发布版本的记录以 [CHANGELOG.md](CHANGELOG.md) 为准。
+当前版本为 **1.1.21**，应用后端已完整迁到 Rust。应用运行及应用包构建不再需要 Node.js，也不携带 JavaScript 服务文件；Swift 界面、系统钥匙串和既有 C 硬件协议保留。已发布版本的记录以 [CHANGELOG.md](CHANGELOG.md) 为准。
 
 ## 当前支持
 
@@ -34,6 +34,7 @@ make package
 ```sh
 make test
 make test-assistant-layout
+make test-assistant-restart
 ```
 
 开发对照测试仍使用 Node.js 和 Python：旧 JavaScript 实现仅作为兼容性对照，不进入应用包。测试包括 Rust 状态/进程测试、临时 TLS 和仿真硬件下的端到端测试、CMS 字节对照，以及 OpenSSL/旧实现之间的数字信封互操作。

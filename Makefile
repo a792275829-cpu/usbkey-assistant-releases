@@ -63,7 +63,7 @@ test-rust-transport:
 	/usr/bin/env node scripts/test_native_backend.mjs
 	/usr/bin/env python3 tests/BridgeControlTests.py
 
-test: $(PROBES) test-process-runner test-assistant-status test-assistant-update test-assistant-install test-desktop-entry test-rust-transport
+test: $(PROBES) test-assistant-restart test-process-runner test-assistant-status test-assistant-update test-assistant-install test-desktop-entry test-rust-transport
 	./$(USB_PROBE) | /usr/bin/python3 -m json.tool >/dev/null
 	./$(PCSC_PROBE) | /usr/bin/python3 -m json.tool >/dev/null
 	/usr/bin/env node --check server/netca_readonly_bridge.mjs
@@ -119,3 +119,10 @@ test-assistant-install: $(BUILD_DIR)/assistant-install-tests
 .PHONY: test-desktop-entry
 test-desktop-entry:
 	/usr/bin/env python3 tests/DesktopEntryTests.py
+
+$(BUILD_DIR)/assistant-restart-tests: app/USBKeyAssistant.swift app/AssistantStatus.swift app/ProcessRunner.swift app/AssistantTheme.swift app/AssistantUpdate.swift app/AssistantUpdateInstall.swift app/AssistantUpdateWindow.swift app/CertificatePinStore.swift tests/AssistantRestartTests.swift | $(BUILD_DIR)
+	/usr/bin/xcrun swiftc $^ -D ASSISTANT_UI_TEST -parse-as-library -framework AppKit -framework Security -o $@
+
+.PHONY: test-assistant-restart
+test-assistant-restart: $(BUILD_DIR)/assistant-restart-tests
+	./$(BUILD_DIR)/assistant-restart-tests
