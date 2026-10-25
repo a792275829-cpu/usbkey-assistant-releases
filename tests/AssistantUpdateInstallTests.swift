@@ -90,6 +90,46 @@ enum AssistantUpdateInstallTests {
         // Signature survives the replacement.
         _ = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", target.path])
 
+        // A read-only running copy installs the downloaded NEW version directly
+        // into Applications, even when there is no previous writable copy.
+        let applications = work.appendingPathComponent("AutoApplications")
+        try fileManager.createDirectory(at: applications, withIntermediateDirectories: true)
+        let readOnlySource = URL(fileURLWithPath: "/Volumes/USBKey/广东电力USBKey助手.app")
+        let automaticTarget = UpdateInstaller.updateTarget(for: readOnlySource, root: applications)
+        precondition(automaticTarget.deletingLastPathComponent().path == applications.path)
+        precondition(UpdateInstaller.updateTarget(for: target, root: applications) == target)
+        precondition(!UpdateInstaller.replaceNeedsAuthorization(automaticTarget))
+        try UpdateInstaller.install(staged: staged, target: automaticTarget, version: "1.1.19")
+        precondition(UpdateInstaller.version(of: automaticTarget) == "1.1.19")
+        _ = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", automaticTarget.path])
+
+        // Failed post-swap verification restores the old version automatically.
+        do {
+            try UpdateInstaller.install(staged: staged, target: target, version: "9.9.9")
+            preconditionFailure("Wrong installed version accepted")
+        } catch InstallError.failed {}
+        precondition(UpdateInstaller.version(of: target) == "1.1.19")
+        _ = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", target.path])
+
+        // The relaunch helper must wait for the old process to exit, then start
+        // the NEW target exactly once, without opening an installer or Finder.
+        let oldProcess = Process()
+        oldProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        oldProcess.arguments = ["2"]
+        try oldProcess.run()
+        let marker = work.appendingPathComponent("restarted.txt")
+        let opener = work.appendingPathComponent("test-open")
+        try "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '\(marker.path)'\n".write(to: opener, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: opener.path)
+        try UpdateInstaller.relaunchAfterExit(automaticTarget, waitingFor: oldProcess.processIdentifier, opener: opener.path)
+        Thread.sleep(forTimeInterval: 0.2)
+        precondition(!fileManager.fileExists(atPath: marker.path), "Relaunched before the old process exited")
+        oldProcess.waitUntilExit()
+        let deadline = Date().addingTimeInterval(5)
+        while !fileManager.fileExists(atPath: marker.path), Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        let restarted = try String(contentsOf: marker, encoding: .utf8)
+        precondition(restarted == "-n\n\(automaticTarget.path)\n", "Unexpected relaunch: \(restarted)")
+
         // The image is detached, so the same plan can be staged again.
         let restaged = try UpdateInstaller.stage(archive: image, plan: plan, target: target)
         precondition(UpdateInstaller.version(of: restaged) == "1.1.19")
@@ -139,6 +179,6 @@ enum AssistantUpdateInstallTests {
         let again = try UpdateInstaller.relocate(staged, into: work.appendingPathComponent("Applications"))
         precondition(again.path == relocated.path)
 
-        print("Disk image staging, permission-only patch installation, in-place replacement and relocation tests PASSED")
+        print("Disk image staging, automatic installation, rollback, exit-before-relaunch, permission-only patch and relocation tests PASSED")
     }
 }

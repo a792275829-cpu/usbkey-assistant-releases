@@ -102,13 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// A copy launched from the mounted image (or from a quarantined download)
-    /// runs read-only and could never install an update. Offer to move it into
-    /// the application folder, which also makes future updates silent.
+    /// runs read-only. Offer to move it into the application folder; updating
+    /// can also install the downloaded new version there automatically.
     private func offerRelocationIfNeeded() {
         guard let guidance = InstallPath.classify(Bundle.main.bundleURL).guidance,
               window.attachedSheet == nil else { return }
         let alert = NSAlert()
-        alert.messageText = "请先把应用安装到“应用程序”"
+        alert.messageText = "建议把应用安装到“应用程序”"
         alert.informativeText = guidance
         alert.addButton(withTitle: "移动并重新打开")
         alert.addButton(withTitle: "稍后")
@@ -118,8 +118,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 do {
                     let destination = try UpdateInstaller.relocate(Bundle.main.bundleURL)
                     DispatchQueue.main.async {
-                        UpdateInstaller.relaunchAfterExit(destination)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
+                        do {
+                            try UpdateInstaller.relaunchAfterExit(destination)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
+                        } catch {
+                            self.showUpdateMessage("无法重新启动", detail: error.localizedDescription)
+                        }
                     }
                 } catch {
                     DispatchQueue.main.async {

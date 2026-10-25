@@ -41,8 +41,7 @@ struct PatchManifest: Decodable {
 ///
 /// An application installed by dragging it out of the disk image belongs to the
 /// user, so the swap runs as that user and never asks for a password. The
-/// prompt only appears once for installations that are still root-owned, and
-/// that run hands ownership back so the next update is silent again.
+/// prompt is only needed when the installation folder cannot be written.
 enum UpdateInstaller {
     static let bundleIdentifier = "cn.gdpower.usbkeyassistant"
 
@@ -230,18 +229,20 @@ enum UpdateInstaller {
 
     /// Whether replacing `target` needs an administrator password.
     ///
-    /// A bundle that the user owns inside a folder the user can write to is
-    /// replaced directly: that is the normal case for an application copied out
-    /// of the disk image, and it is why repeated updates stay silent.
+    /// A bundle inside a writable, non-sticky directory can be replaced directly,
+    /// including a root-owned bundle left by a legacy PKG installation.
     static func replaceNeedsAuthorization(_ target: URL) -> Bool {
         guard getuid() != 0 else { return false }
         guard FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path) else {
             return true
         }
-        // A root-owned bundle cannot be cleared afterwards by a normal user, so
-        // ask once and hand ownership over during that same privileged run.
+        // Renaming a bundle depends on its parent directory, not on who owns
+        // its contents. A legacy PKG bundle can therefore be swapped silently
+        // in a writable /Applications folder. Sticky directories are different.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: target.deletingLastPathComponent().path)
+        let mode = (attributes?[.posixPermissions] as? NSNumber)?.intValue ?? 0
         let owner = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.ownerAccountID] as? NSNumber
-        guard let owner else { return true }
+        guard mode & 0o1000 != 0, let owner else { return false }
         return owner.uint32Value != getuid()
     }
 
@@ -261,7 +262,8 @@ enum UpdateInstaller {
         }
         defer { try? FileManager.default.removeItem(at: script) }
         let arguments = [script.path, staged.path, target.path, expected,
-                         String(getuid()), String(getgid())]
+                         String(getuid()), String(getgid()),
+                         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash/USBKeyPrevious-\(UUID().uuidString).app").path]
         let result: ProcessResult
         if replaceNeedsAuthorization(target) {
             let command = "/bin/sh " + arguments.map(shellQuoted).joined(separator: " ")
@@ -283,6 +285,13 @@ enum UpdateInstaller {
         guard version(of: target) == expected else {
             throw InstallError.failed("安装后版本校验失败，请从发布页面重新安装")
         }
+    }
+
+    /// Read-only running copies update directly into Applications in the same
+    /// operation, without first moving and restarting the old version.
+    static func updateTarget(for running: URL, root: URL? = nil) -> URL {
+        if InstallPath.classify(running).canUpdateInPlace { return running }
+        return (root ?? installRoot()).appendingPathComponent(running.lastPathComponent)
     }
 
     /// Installation folder for a bundle the user is moving out of a disk image:
@@ -318,16 +327,22 @@ enum UpdateInstaller {
 
     /// Relaunches the installed application once this process has exited, so the
     /// new bundle is not fighting the old one for the bridge port.
-    static func relaunchAfterExit(_ target: URL) {
-        let pid = ProcessInfo.processInfo.processIdentifier
+    static func relaunchAfterExit(_ target: URL,
+                                  waitingFor pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+                                  opener: String = "/usr/bin/open") throws {
         let script = "while /bin/kill -0 \(pid) 2>/dev/null; do /bin/sleep 0.2; done; "
-            + "/usr/bin/open \(shellQuoted(target.path))"
+            + "\(shellQuoted(opener)) -n \(shellQuoted(target.path))"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", script]
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        try? process.run()
+        do {
+            try process.run()
+        } catch {
+            throw InstallError.failed("更新已安装，但无法启动自动重启进程：\(error.localizedDescription)")
+        }
     }
 
     // MARK: - Helpers
@@ -368,9 +383,14 @@ enum UpdateInstaller {
     VERSION=$3
     OWNER_UID=${4:-}
     OWNER_GID=${5:-}
+    TRASH=${6:-}
     fail() { echo "apply-update: $*" >&2; exit 1; }
     [ -d "$STAGED" ] || fail "staged bundle is missing"
-    [ -d "$TARGET" ] || fail "installed bundle is missing"
+    [ ! -e "$TARGET" ] || [ -d "$TARGET" ] || fail "installation path is not a directory"
+    if [ -d "$TARGET" ]; then
+      IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TARGET/Contents/Info.plist" 2>/dev/null || true)
+      [ "$IDENTIFIER" = "cn.gdpower.usbkeyassistant" ] || fail "installed application identifier does not match"
+    fi
     STAGE="$TARGET.updating"
     BACKUP="$TARGET.previous.$$"
     rm -rf "$STAGE" 2>/dev/null || true
@@ -385,14 +405,30 @@ enum UpdateInstaller {
     for OLD in "$TARGET.previous" "$TARGET.previous".*; do
       [ -e "$OLD" ] && rm -rf "$OLD" 2>/dev/null || true
     done
-    /bin/mv "$TARGET" "$BACKUP" || fail "cannot move the installed bundle aside"
+    HAD_TARGET=0
+    if [ -d "$TARGET" ]; then
+      /bin/mv "$TARGET" "$BACKUP" || fail "cannot move the installed bundle aside"
+      HAD_TARGET=1
+    fi
     if ! /bin/mv "$STAGE" "$TARGET"; then
-      /bin/mv "$BACKUP" "$TARGET" || fail "cannot restore the installed bundle"
+      if [ "$HAD_TARGET" = 1 ]; then /bin/mv "$BACKUP" "$TARGET" || fail "cannot restore the installed bundle"; fi
       fail "cannot install the new bundle"
     fi
-    rm -rf "$BACKUP" 2>/dev/null || true
     INSTALLED=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$TARGET/Contents/Info.plist" 2>/dev/null || true)
-    [ "$INSTALLED" = "$VERSION" ] || fail "installed version is $INSTALLED"
+    if [ "$INSTALLED" != "$VERSION" ]; then
+      rm -rf "$TARGET"
+      if [ "$HAD_TARGET" = 1 ]; then /bin/mv "$BACKUP" "$TARGET" || fail "cannot restore the installed bundle"; fi
+      fail "installed version is $INSTALLED"
+    fi
+    # A legacy root-owned bundle may be renamed but not recursively deleted.
+    # Move it to Trash when possible; never request authorization just to clean
+    # up a backup after the new application has already been installed.
+    if [ "$HAD_TARGET" = 1 ]; then
+      rm -rf "$BACKUP" 2>/dev/null || true
+      if [ -e "$BACKUP" ] && [ -n "$TRASH" ] && [ -d "$(/usr/bin/dirname "$TRASH")" ]; then
+        /bin/mv "$BACKUP" "$TRASH" 2>/dev/null || true
+      fi
+    fi
     echo "installed $VERSION"
     """
 }

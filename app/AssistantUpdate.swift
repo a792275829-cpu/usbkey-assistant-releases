@@ -117,12 +117,12 @@ enum InstallPath: Equatable {
         }
     }
 
-    /// Explanation shown instead of an update button when the bundle has to be
-    /// moved before it can be replaced.
+    /// Guidance when starting from a read-only copy. The update window can
+    /// install the downloaded new version directly into Applications.
     var guidance: String? {
         switch self {
         case .translocated, .readOnlyVolume:
-            return "当前版本是从安装镜像或下载副本直接运行的，无法就地更新。请先把应用移到“应用程序”文件夹。"
+            return "当前版本是从安装镜像或下载副本直接运行的，建议移到“应用程序”文件夹；也可在更新时自动安装新版本并重启。"
         case .systemApplications, .userApplications, .other:
             return nil
         }

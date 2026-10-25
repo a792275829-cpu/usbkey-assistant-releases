@@ -22,10 +22,7 @@ final class AssistantUpdateWindow: NSWindowController {
         super.init(window: panel)
         let content = AssistantSurface(fill: AssistantTheme.background, radius: 0, bordered: false)
         panel.contentView = content
-        let manageable = location.canUpdateInPlace
-        primary = manageable
-            ? AssistantButton("开始更新", style: .primary, symbol: "arrow.down.circle", target: self, action: #selector(performUpdate))
-            : AssistantButton("移到“应用程序”", style: .primary, symbol: "arrow.down.app", target: self, action: #selector(relocate))
+        primary = AssistantButton("开始更新", style: .primary, symbol: "arrow.down.circle", target: self, action: #selector(performUpdate))
         cancelButton = AssistantButton("稍后", style: .quiet, target: self, action: #selector(dismiss))
         cancelButton.keyEquivalent = "\u{1b}"
         let releaseButton = AssistantButton("发布页面", style: .quiet, symbol: "arrow.up.right", target: self, action: #selector(openRelease))
@@ -62,9 +59,10 @@ final class AssistantUpdateWindow: NSWindowController {
             view.translatesAutoresizingMaskIntoConstraints = false
             view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
-        if let guidance = location.guidance {
-            status.stringValue = guidance
-        } else if release.plan(installed: installedVersion) == nil {
+        if !location.canUpdateInPlace {
+            status.stringValue = "点击“开始更新”，自动安装到“应用程序”并重启，无需先手动移动。"
+        }
+        if release.plan(installed: installedVersion) == nil {
             primary.isEnabled = false
             status.stringValue = UpdateError.missingInstaller.localizedDescription
         }
@@ -91,7 +89,7 @@ final class AssistantUpdateWindow: NSWindowController {
     /// required — the application is user-owned once it has been dragged out of
     /// the disk image, so replacing it needs no administrator password.
     @objc private func performUpdate() {
-        guard !working, location.canUpdateInPlace else { return }
+        guard !working else { return }
         guard let plan = release.plan(installed: installedVersion) else {
             status.stringValue = UpdateError.missingInstaller.localizedDescription
             return
@@ -102,30 +100,6 @@ final class AssistantUpdateWindow: NSWindowController {
         progress.isHidden = false
         progress.doubleValue = 0
         begin(plan, fallback: false)
-    }
-
-    /// Installs a copy that is running straight from the disk image or from a
-    /// quarantined download, then reopens it from the application folder.
-    @objc private func relocate() {
-        guard !working else { return }
-        working = true
-        primary.isEnabled = false
-        primary.title = "正在移动…"
-        status.stringValue = "正在复制应用到“应用程序”文件夹…"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let destination = try UpdateInstaller.relocate(Bundle.main.bundleURL)
-                DispatchQueue.main.async {
-                    self.primary.title = "正在重新启动…"
-                    self.status.stringValue = "已安装到 \(destination.deletingLastPathComponent().path)，正在重新打开。"
-                    UpdateInstaller.relaunchAfterExit(destination)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { NSApp.terminate(nil) }
-                }
-            } catch {
-                DispatchQueue.main.async { self.fail(error) }
-            }
-        }
     }
 
     private func begin(_ plan: UpdatePlan, fallback: Bool) {
@@ -161,11 +135,12 @@ final class AssistantUpdateWindow: NSWindowController {
         status.stringValue = "校验通过，正在准备安装…"
         progress.doubleValue = 1
         primary.title = "正在安装…"
-        let target = Bundle.main.bundleURL
+        let source = Bundle.main.bundleURL
+        let target = UpdateInstaller.updateTarget(for: source)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                let staged = try UpdateInstaller.stage(archive: file, plan: plan, target: target)
+                let staged = try UpdateInstaller.stage(archive: file, plan: plan, target: source)
                 defer {
                     try? FileManager.default.removeItem(at: staged.deletingLastPathComponent())
                     try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
@@ -200,8 +175,12 @@ final class AssistantUpdateWindow: NSWindowController {
         primary.title = "正在重新启动…"
         primary.isEnabled = false
         status.stringValue = "已安装 v\(plan.version)，正在重新启动。"
-        UpdateInstaller.relaunchAfterExit(target)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { NSApp.terminate(nil) }
+        do {
+            try UpdateInstaller.relaunchAfterExit(target)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { NSApp.terminate(nil) }
+        } catch {
+            fail(error)
+        }
     }
 
     private func fail(_ error: Error) {
