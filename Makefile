@@ -18,7 +18,7 @@ $(BUILD_DIR)/pin-store-tests: app/CertificatePinStore.swift tests/CertificatePin
 	/usr/bin/xcrun swiftc $^ -parse-as-library -framework Security -o $@
 
 test-pin-store: $(BUILD_DIR)/pin-store-tests
-	./$(BUILD_DIR)/pin-store-tests "$$(command -v node)" "$(CURDIR)"
+	./$(BUILD_DIR)/pin-store-tests
 
 
 $(BUILD_DIR):
@@ -42,7 +42,7 @@ probe: $(PROBES)
 	./$(HID_PROBE)
 
 verify-key: $(HID_PROBE)
-	./$(HID_PROBE) | /usr/bin/python3 -m json.tool
+	./$(HID_PROBE) | /usr/bin/plutil -convert json -r -o /dev/stdout -
 
 tls:
 	/bin/sh scripts/setup_local_tls.sh
@@ -56,28 +56,22 @@ rust-transport:
 bridge-rust: $(HID_PROBE) $(HID_SIGNER) rust-transport
 	./$(RUST_TRANSPORT) --probe "$(CURDIR)/build/ft3000gm-hid-probe" --signer "$(CURDIR)/build/ft3000gm-signer" --cert "$(CURDIR)/.local/tls/localhost.crt" --key "$(CURDIR)/.local/tls/localhost.key"
 
-test-rust-transport:
+$(BUILD_DIR)/test-device-helper: tests/fixtures/DeviceHelper.swift | $(BUILD_DIR)
+	/usr/bin/xcrun swiftc $< -O -o $@
+
+test-rust-transport: $(BUILD_DIR)/test-device-helper
 	$(CARGO) test --locked --manifest-path rust-transport/Cargo.toml
 	$(CARGO) build --locked --manifest-path rust-transport/Cargo.toml
 	/usr/bin/env node scripts/test_rust_transport.mjs
 	/usr/bin/env node scripts/test_native_backend.mjs
-	/usr/bin/env python3 tests/BridgeControlTests.py
+	/usr/bin/env node scripts/test_bridge_control.mjs
 
 test: $(PROBES) test-assistant-restart test-process-runner test-assistant-status test-assistant-update test-assistant-install test-desktop-entry test-rust-transport
-	./$(USB_PROBE) | /usr/bin/python3 -m json.tool >/dev/null
-	./$(PCSC_PROBE) | /usr/bin/python3 -m json.tool >/dev/null
-	/usr/bin/env node --check server/netca_readonly_bridge.mjs
-	/usr/bin/env node scripts/test_enveloped_data.mjs
-	/usr/bin/env node scripts/test_decryption.mjs
-	/usr/bin/env node scripts/test_bridge_architecture.mjs
+	./$(USB_PROBE) | /usr/bin/plutil -convert xml1 -o /dev/null -
+	./$(PCSC_PROBE) | /usr/bin/plutil -convert xml1 -o /dev/null -
 	/usr/bin/env node scripts/test_device_lock.mjs
-	/usr/bin/env node scripts/test_device_status.mjs
-	/usr/bin/env node scripts/test_rpc_sessions.mjs
-	/usr/bin/env node scripts/test_pin_persistence.mjs
-	/usr/bin/env node scripts/test_device_monitor.mjs
 	/usr/bin/env node scripts/test_device_selection.mjs
-	/usr/bin/env node scripts/test_device_choice.mjs
-	/usr/bin/env python3 tests/PatchManifestTests.py
+	/usr/bin/env node scripts/test_project_tools.mjs
 
 $(BUILD_DIR)/process-runner-tests: app/ProcessRunner.swift tests/ProcessRunnerTests.swift | $(BUILD_DIR)
 	/usr/bin/xcrun swiftc $^ -parse-as-library -o $@
@@ -101,7 +95,8 @@ app package:
 	/bin/sh scripts/build_release.sh
 
 clean:
-	rm -f $(PROBES)
+	rm -rf $(BUILD_DIR)
+	$(CARGO) clean --manifest-path rust-transport/Cargo.toml
 
 $(BUILD_DIR)/assistant-update-tests: app/AssistantUpdate.swift tests/AssistantUpdateTests.swift | $(BUILD_DIR)
 	/usr/bin/xcrun swiftc $^ -parse-as-library -o $@
@@ -118,7 +113,7 @@ test-assistant-install: $(BUILD_DIR)/assistant-install-tests
 
 .PHONY: test-desktop-entry
 test-desktop-entry:
-	/usr/bin/env python3 tests/DesktopEntryTests.py
+	/usr/bin/env node scripts/test_desktop_entry.mjs
 
 $(BUILD_DIR)/assistant-restart-tests: app/USBKeyAssistant.swift app/AssistantStatus.swift app/ProcessRunner.swift app/AssistantTheme.swift app/AssistantUpdate.swift app/AssistantUpdateInstall.swift app/AssistantUpdateWindow.swift app/CertificatePinStore.swift tests/AssistantRestartTests.swift | $(BUILD_DIR)
 	/usr/bin/xcrun swiftc $^ -D ASSISTANT_UI_TEST -parse-as-library -framework AppKit -framework Security -o $@

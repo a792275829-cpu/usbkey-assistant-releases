@@ -342,11 +342,7 @@ mod tests {
             ));
             fs::create_dir(&dir).unwrap();
             let script = dir.join("helper");
-            fs::write(
-                &script,
-                format!("#!/usr/bin/python3\nimport sys,os,time,json\n{body}\n"),
-            )
-            .unwrap();
+            fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
             fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
             Self(dir)
         }
@@ -440,7 +436,9 @@ mod tests {
 
     #[tokio::test]
     async fn drains_both_pipes_without_logging_stderr() {
-        let fixture = Fixture::new("os.write(2,b'e'*48000)\nos.write(1,b'o'*800000)");
+        let fixture = Fixture::new(
+            "/bin/dd if=/dev/zero bs=48000 count=1 >&2 2>/dev/null\n/bin/dd if=/dev/zero bs=800000 count=1 2>/dev/null",
+        );
         let result = run(&fixture).await.unwrap();
         assert_eq!(result["code"], 0);
         assert_eq!(result["stdout"].as_str().unwrap().len(), 800000);
@@ -451,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn preserves_nonzero_business_result_without_retry() {
         let fixture = Fixture::new(
-            "print('{\"pin_verified\":false,\"verify_sw\":\"63C2\",\"retries\":2}')\nsys.exit(4)",
+            "printf '%s\\n' '{\"pin_verified\":false,\"verify_sw\":\"63C2\",\"retries\":2}'\nexit 4",
         );
         let result = run(&fixture).await.unwrap();
         assert_eq!(result["code"], 4);
@@ -462,7 +460,7 @@ mod tests {
     async fn rejects_stdout_and_stderr_overflow_and_reaps() {
         for (fd, size) in [(1, 1024 * 1024 + 1), (2, 65537)] {
             let fixture = Fixture::new("");
-            fs::write(fixture.0.join("helper"), format!("#!/usr/bin/python3\nimport os,time\nopen({:?},'w').write(str(os.getpid()))\nos.write({fd},b'x'*{size})\ntime.sleep(30)\n", fixture.pid_file())).unwrap();
+            fs::write(fixture.0.join("helper"), format!("#!/bin/sh\nprintf '%s' $$ > {:?}\n/bin/dd if=/dev/zero bs={size} count=1 >&{fd} 2>/dev/null\nexec /bin/sleep 30\n", fixture.pid_file())).unwrap();
             assert_eq!(run(&fixture).await.unwrap_err().to_string(), "output_limit");
             assert_reaped(&fixture);
         }
@@ -471,7 +469,14 @@ mod tests {
     #[tokio::test]
     async fn deadline_kills_and_waits_for_helper() {
         let fixture = Fixture::new("");
-        fs::write(fixture.0.join("helper"), format!("#!/usr/bin/python3\nimport os,time\nopen({:?},'w').write(str(os.getpid()))\ntime.sleep(30)\n", fixture.pid_file())).unwrap();
+        fs::write(
+            fixture.0.join("helper"),
+            format!(
+                "#!/bin/sh\nprintf '%s' $$ > {:?}\nexec /bin/sleep 30\n",
+                fixture.pid_file()
+            ),
+        )
+        .unwrap();
         let (_stop, mut stopped) = watch::channel(false);
         let result = execute(
             &probe(),
@@ -515,7 +520,14 @@ mod tests {
     #[tokio::test]
     async fn shutdown_cancels_active_helper_and_reaps() {
         let fixture = Fixture::new("");
-        fs::write(fixture.0.join("helper"), format!("#!/usr/bin/python3\nimport os,time\nopen({:?},'w').write(str(os.getpid()))\ntime.sleep(30)\n", fixture.pid_file())).unwrap();
+        fs::write(
+            fixture.0.join("helper"),
+            format!(
+                "#!/bin/sh\nprintf '%s' $$ > {:?}\nexec /bin/sleep 30\n",
+                fixture.pid_file()
+            ),
+        )
+        .unwrap();
         let (stop, mut stopped) = watch::channel(false);
         let signal = async {
             while !fixture.0.join("pid").exists() {
@@ -540,7 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_and_encoding_failures_are_fixed_identifiers() {
-        let fixture = Fixture::new("os.write(1,b'\\xff')");
+        let fixture = Fixture::new("printf '\\377'");
         assert_eq!(
             run(&fixture).await.unwrap_err().to_string(),
             "invalid_output"
@@ -553,7 +565,7 @@ mod tests {
     async fn supervisor_serializes_jobs_and_recovers_after_failure() {
         let fixture = Fixture::new("");
         let marker = fixture.0.join("calls");
-        fs::write(fixture.0.join("helper"), format!("#!/usr/bin/python3\nimport time\nwith open({marker:?},'a') as f: f.write('start\\n')\ntime.sleep(.03)\nwith open({marker:?},'a') as f: f.write('end\\n')\nprint('{{\"devices\":[]}}')\n")).unwrap();
+        fs::write(fixture.0.join("helper"), format!("#!/bin/sh\nprintf 'start\\n' >> {marker:?}\n/bin/sleep .03\nprintf 'end\\n' >> {marker:?}\nprintf '%s\\n' '{{\"devices\":[]}}'\n")).unwrap();
         let (jobs, receiver) = mpsc::channel(4);
         let (replies, mut received) = mpsc::channel(4);
         let (stop, stopped) = watch::channel(false);

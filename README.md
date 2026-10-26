@@ -2,7 +2,7 @@
 
 macOS 原生 USBKey 助手，提供设备与证书状态、网页登录桥接、硬件签名、数字信封加解密，以及应用内更新。
 
-当前版本为 **1.1.21**，应用后端已完整迁到 Rust。应用运行及应用包构建不再需要 Node.js，也不携带 JavaScript 服务文件；Swift 界面、系统钥匙串和既有 C 硬件协议保留。已发布版本的记录以 [CHANGELOG.md](CHANGELOG.md) 为准。
+当前版本为 **1.1.22**，应用后端已完整迁到 Rust。应用运行及应用包构建不再需要 Python 或 Node.js，也不携带 JavaScript 服务文件；Swift 界面、系统钥匙串和既有 C 硬件协议保留。已发布版本的记录以 [CHANGELOG.md](CHANGELOG.md) 为准。
 
 ## 当前支持
 
@@ -25,7 +25,7 @@ SKIP_PACKAGE=1 make app
 make package
 ```
 
-应用产物在 `build/release/`，对外发布的安装镜像是 `dist/<名称>-<版本>-apple-silicon.dmg`（拖拽安装），同一目录还会生成用于旧客户端升级的 `.pkg`；`BUILD_PKG=0 make package` 只产出镜像。构建会检查 Apple 芯片架构、系统动态库依赖、第三方许可证，以及包内不存在 Node/JavaScript 运行时。构建不会安装应用、改变系统证书信任或发布 GitHub Release。
+应用产物在 `build/release/`，对外发布的安装镜像是 `dist/<名称>-<版本>-apple-silicon.dmg`（拖拽安装），同一目录还会生成用于旧客户端升级的 `.pkg`；`BUILD_PKG=0 make package` 只产出镜像。构建会检查 Apple 芯片架构、系统动态库依赖、第三方许可证，以及包内不存在 Python/Node/JavaScript 运行时。构建不会安装应用、改变系统证书信任或发布 GitHub Release。
 
 构建所需的数据文件只有 `vendor/netca/netca-trust.sqlite`（60 KB，随仓库提交）。逆向分析与取证产物放在本地 `work/`，不纳入版本库，构建也不再依赖它，详见 [work/README.md](work/README.md)。
 
@@ -37,7 +37,7 @@ make test-assistant-layout
 make test-assistant-restart
 ```
 
-开发对照测试仍使用 Node.js 和 Python：旧 JavaScript 实现仅作为兼容性对照，不进入应用包。测试包括 Rust 状态/进程测试、临时 TLS 和仿真硬件下的端到端测试、CMS 字节对照，以及 OpenSSL/旧实现之间的数字信封互操作。
+开发测试仅额外需要 Node.js，作为 TLS/WebSocket 测试客户端；硬件桩由 Swift 编译。项目已删除 Python 脚本及旧 JavaScript 后端，证书、CMS 和信封兼容性通过固定测试样本与系统 OpenSSL 验证。构建和发布辅助工具统一在 `scripts/ProjectTools.swift`。
 
 准备本地 TLS 证书后，可独立启动 Rust 桥：
 
@@ -51,3 +51,15 @@ make bridge
 本版本已进行离线兼容验证与应用构建检查，尚未进行实物 PIN/签名/解密、真实钥匙串读写、目标网站及完整安装升级复测。
 
 实现边界与迁移记录见 [Rust 后端说明](docs/RUST_TRANSPORT.md)，发布流程见 [更新说明](docs/GITHUB_UPDATES.md)。
+
+## 项目目录
+
+- `app/`：Swift 应用及系统集成。
+- `rust-transport/`：Rust 网络服务与业务后端。
+- `src/`：C 硬件协议和探测工具。
+- `scripts/`：构建、发布及开发测试入口。
+- `tests/`：Swift 测试、测试支持和固定兼容样本。
+- `packaging/`：安装、桌面入口迁移和卸载。
+- `docs/`：当前协议、运行及发布说明；`docs/archive/` 保留历史分析。
+
+`make clean` 清理本地产生的构建文件和 Rust 缓存，保留历史发布基线、TLS 配置及取证材料。

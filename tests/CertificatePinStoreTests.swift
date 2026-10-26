@@ -4,31 +4,26 @@ import Foundation
     static func main() throws {
         let service = "cn.gdpower.usbkey-assistant.test.\(UUID().uuidString)"
         defer { _ = CertificatePinStore.perform(["operation": "clear"], service: service) }
-        let node = CommandLine.arguments[1]
-        let root = CommandLine.arguments[2]
-        func run(_ source: String) throws {
-            let channel = CertificatePinChannel(service: service)
-            defer { channel.close() }
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: node)
-            process.currentDirectoryURL = URL(fileURLWithPath: root)
-            process.arguments = ["--input-type=module", "-e", """
-                import assert from 'node:assert/strict';
-                import {createKeychainPinStore} from './server/pin-store.mjs';
-                const store=createKeychainPinStore();
-                const binding='test:'+'C'.repeat(64);
-                \(source)
-                process.exit(0);
-                """]
-            process.environment = ["PATH": "/usr/bin:/bin", "USBKEY_PRIVATE_PIN_CHANNEL": "1"]
-            process.standardOutput = channel.output
-            process.standardInput = channel.input
-            try process.run()
-            process.waitUntilExit()
-            precondition(process.terminationStatus == 0, "Private keychain channel failed")
+        let account = String(repeating: "c", count: 64)
+        func session(_ operations: [[String: Any]]) throws -> [[String: Any]] {
+            let channel = CertificatePinChannel(service: service); defer { channel.close() }
+            return try operations.enumerated().map { index, operation in
+                var request = operation; request["privateChannel"] = "pin-store-v1"; request["requestId"] = index
+                var data = try JSONSerialization.data(withJSONObject: request); data.append(10)
+                try channel.output.fileHandleForWriting.write(contentsOf: data)
+                var reply = Data()
+                while let byte = try channel.input.fileHandleForReading.read(upToCount: 1), !byte.isEmpty {
+                    if byte.first == 10 { break }; reply.append(byte)
+                }
+                let result = try JSONSerialization.jsonObject(with: reply) as! [String: Any]
+                precondition(result["requestId"] as? Int == index); precondition(result["privateChannel"] as? String == "pin-store-v1")
+                return result
+            }
         }
-        try run("await store.write(binding,'test-only-pin'); assert.equal(await store.read(binding),'test-only-pin');")
-        try run("assert.equal(await store.read(binding),'test-only-pin'); await store.remove(binding); assert.equal(await store.read(binding),null);")
-        print("Native keychain private-pipe write/read/restart/delete tests PASSED")
+        let first = try session([["operation": "write", "account": account, "pin": "test-only-pin"], ["operation": "read", "account": account]])
+        precondition(first[0]["status"] as? Int == 0); precondition(first[1]["pin"] as? String == "test-only-pin")
+        let next = try session([["operation": "read", "account": account], ["operation": "remove", "account": account], ["operation": "read", "account": account]])
+        precondition(next[0]["pin"] as? String == "test-only-pin"); precondition(next[1]["status"] as? Int == 0); precondition(next[2]["status"] as? Int == -25300)
+        print("Native Keychain private-pipe write/read/channel recreation/delete tests PASSED")
     }
 }

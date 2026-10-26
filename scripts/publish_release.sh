@@ -46,31 +46,7 @@ fi
 # Most releases only change a few files. Offer a patch that upgrades the
 # previous build in place; the client verifies it against its own installation
 # and falls back to the full image when anything does not match.
-PREVIOUS_VERSION=${PATCH_FROM:-$(/usr/bin/python3 - "$PROJECT_DIR/dist" "$VERSION" <<'PY'
-import os
-import re
-import sys
-
-directory, current = sys.argv[1], sys.argv[2]
-
-
-def key(value):
-    return tuple(int(part) for part in value.split("."))
-
-
-best = ""
-for entry in os.listdir(directory):
-    match = re.search(r"-(\d+(?:\.\d+)+)-apple-silicon\.(dmg|pkg)$", entry)
-    if not match:
-        continue
-    version = match.group(1)
-    if key(version) >= key(current):
-        continue
-    if not best or key(version) > key(best):
-        best = version
-print(best)
-PY
-)}
+PREVIOUS_VERSION=${PATCH_FROM:-$(/bin/sh "$SCRIPT_DIR/project-tool.sh" previous-version "$PROJECT_DIR/dist" "$VERSION")}
 PATCH_PATH=""
 if [ -n "$PREVIOUS_VERSION" ]; then
     PREVIOUS=""
@@ -82,7 +58,7 @@ if [ -n "$PREVIOUS_VERSION" ]; then
         fi
     done
     if [ -n "$PREVIOUS" ]; then
-        PATCH_OUTPUT=$(/usr/bin/python3 "$SCRIPT_DIR/build_patch.py" --from "$PREVIOUS" 2>&1 || true)
+        PATCH_OUTPUT=$(/bin/sh "$SCRIPT_DIR/project-tool.sh" patch --from "$PREVIOUS" 2>&1 || true)
         printf '%s\n' "$PATCH_OUTPUT" | /usr/bin/grep -v '^PATCH=' >&2 || true
         PATCH_PATH=$(printf '%s\n' "$PATCH_OUTPUT" | /usr/bin/sed -n 's/^PATCH=//p')
     else

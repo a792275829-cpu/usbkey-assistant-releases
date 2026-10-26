@@ -1,4 +1,4 @@
-//! Bound authentication state. No PINs are retained in the Node adapter between
+//! Bound authentication state. No PINs are retained in the business worker between
 //! requests. Tokens fence asynchronous prompts, Keychain I/O and hardware work.
 use serde::Deserialize;
 use serde_json::{Value, json};

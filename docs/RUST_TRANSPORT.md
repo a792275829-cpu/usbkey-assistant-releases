@@ -1,152 +1,81 @@
-# Rust 后端分阶段迁移
-
-## 当前状态：运行时已完全替换 Node（2026-10-22）
-
-默认应用已切换为两个 Rust 程序：`usbkey-transport` 负责网络、PIN 状态和受控进程执行，`usbkey-worker` 负责 RPC、证书筛选、设备监测、密码/钥匙串协调及 CMS。应用包不再包含 Node、JavaScript 服务或运行时下载步骤。Swift 与 C 硬件协议保持原实现。
-
-构建及运行：`SKIP_PACKAGE=1 make app`、`make package`、`make bridge`。`USE_RUST_TRANSPORT=1` 不再是启用条件；默认即为 Rust。开发对照测试仍需要 Node，旧 `--node/--worker` 路径仅用于兼容性回归，不进入应用启动参数或应用资源。
-
-新版 CMS 实现使用静态链接的 OpenSSL 进行基础密码运算，按既有协议构造 ASN.1，保留 SHA-1/SHA-256、无 signedAttrs、仅叶证书、issuerAndSerialNumber，以及默认 rsaEncryption OID 的区别。`includeCertOption` 继续按原兼容实现接受 0～3，并保持叶证书输出，不扩展未实现的原厂选项语义。
-
-PIN 仍通过原 Swift `pin-store-v1` 私有管道保存，账号算法保持不变；Rust 完成钥匙串协调。密码弹窗通过固定系统脚本运行，并纳入主执行器的 120 秒超时与进程组清理，PIN 不进入命令行。诊断保留脱敏审计与一次性证书选择规则采样。
-
-构建会生成 Rust/OpenSSL 等依赖许可，并检查实际应用包仅依赖系统动态库、不包含 Node/JavaScript 文件。已构建应用位于 `build/release/`，体积约 26 MB；包内实际 Rust 二进制也已通过同一套端到端测试，尚未安装或发布。
-
-本轮验证包括临时 TLS、Python 硬件桩及模拟钥匙串协议下的端到端测试：证书元数据逐字段对照、真实页面筛选规则、12 组 CMS 逐字节对照、AES-128/256 信封与 OpenSSL/旧实现交叉解密、多设备选择、错误 PIN 单次执行、无 PIN 解密、损坏签名公钥自检失败、拔插通知和服务退出。构建部署目标为 macOS 12.0，不代表已在 macOS 12 实机复测。
-
-仍需人工完成实物 PIN/签名/解密、真实钥匙串、目标网站及完整安装升级复测。下文第一至第三阶段内容为迁移过程记录，其中 Node 协调、可选入口等描述已被本节的完整 Rust 实现取代。
-
-## 历史迁移记录（以下入口及架构已由上述实现取代）
-
-第一阶段接管 TLS、HTTP 和 WebSocket；第二阶段接管硬件工具的进程执行、超时及回收；第三阶段接管 PIN 缓存、认证租约和绑定失效状态。RPC、CMS、证书选择和 C 硬件协议沿用当时实现；Node 当时协调密码弹窗、Swift 钥匙串及业务回调。以下记录保留当时的可选构建与调试命令，不作为当前应用启动说明。
+# Rust 后端
 
 ## 组件边界
+
+应用默认使用两个 Rust 程序，不再提供旧 Node worker 入口。Swift 负责界面、系统钥匙串和应用更新，C 工具负责 FT3000GM 硬件协议。
 
 ```text
 浏览器 / Swift 主应用
          │ HTTPS / WSS（仅 127.0.0.1）
          ▼
-usbkey-transport（Rust：网络层 + 硬件执行器 + PIN 会话）
-         ├─ 启动、监督并回收原 C 探测及签名工具
+usbkey-transport（Rust）
+         ├─ TLS/HTTP/WSS、状态快照、控制请求期限
+         ├─ PIN 缓存、认证租约、单次硬件授权
+         ├─ C 硬件工具和系统密码弹窗的超时与回收
          │ 继承的 Unix socket，子进程 fd 3
          ▼
-transport-worker.mjs（Node）
-         ├─ 原 RPC / CMS / 设备监测 / 串行队列
-         ├─ 硬件调用经同一私有 socket 发回 Rust 执行器
-         ├─ 弹窗、钥匙串 I/O 与认证事务回调协调
+usbkey-worker（Rust）
+         ├─ RPC、证书解析与筛选、多设备选择
+         ├─ CMS 签名、数字信封加解密
+         ├─ 串行业务队列、设备订阅与通知
          └─ stdin/stdout 私有管道 → Swift 钥匙串
 ```
 
-Node worker 不监听网络端口。内部通道不落盘，也不经过 HTTP；钥匙串管道保留原有 `pin-store-v1` 协议，由 Swift 处理。认证与硬件请求会在私有 socket 中携带 PIN，Rust 仅通过标准输入传给 C 工具，不放入命令行、环境变量或诊断信息。Rust 对缓存、受控输入及 IPC 缓冲执行清零；Node 仍会在当前操作和序列化期间产生 PIN 字符串副本，因此不声称消除了所有密码副本。
+私有通道不落盘，不经过 HTTP；worker 启动时验证 fd 3 是已连接的 Unix 套接字。PIN 仅通过私有通道和 C 工具标准输入传递，不写入参数、环境变量或诊断日志。Rust 对缓存及受控输入缓冲执行清零。worker 或私有通道异常时 transport 退出；应用退出、父进程消失或 worker 崩溃时停止并回收活动工具。
 
-目前仍须随应用携带 Node，暂不产生移除 Node 运行时的体积收益。Rust 二进制属于额外组件。
+## 网络与队列
 
-## 接口与限制
+- 保留 `/health`、`/status`、`/selection`、`/pin-cache/clear`、既有 RPC 信封、错误码和字段别名。
+- WSS 校验网站 Origin 与 `crypto-jsonrpc-protocol` 子协议；管理接口拒绝带 Origin 的请求。
+- WebSocket 消息/帧上限 1 MiB，内部响应及写缓冲上限 16 MiB；管理 POST 请求体上限 1 KiB、读取时限 5 秒。
+- 最多 128 个 WebSocket，每连接收发队列各 64 项，内部等待请求最多 64 项。慢客户端发送超时后断开。
+- RPC、设备选择、密码清理和监测使用串行业务队列。断线后跳过尚未执行的该连接 RPC；已开始的硬件操作可能完成，不重放或自动重试。
+- `/status` 最多等待 3 秒；队列忙时返回最近快照及 `stale: true`，没有快照则返回 503。并发读者合并扫描，HTTP 等待结束后后台结果仍更新缓存。
+- `/selection` 和 `/pin-cache/clear` 最多排队 10 秒。worker 执行前确认 `controlId` 仍有效，过期请求不执行；获准开始后等待真实结果。Swift 等待上限覆盖最长 120 秒的钥匙串交互。
+- 设备枚举缓存 1 秒；状态、选择和监测强制重新枚举。每秒监测仅在存在 `MonitorDevice` 订阅时运行；无订阅时不轮询硬件。
 
-- 保留 `/health`、`/status`、`/selection` 和 `/pin-cache/clear`，继续返回原 RPC 信封、错误码和字段别名。
-- WSS 继续要求既有网站 Origin 和 `crypto-jsonrpc-protocol` 子协议；本地管理接口继续拒绝带 Origin 的请求。
-- 使用库处理握手、分片、UTF-8、控制帧与关闭握手，拒绝无掩码、保留位错误、超限帧和非法控制帧。
-- 输入消息和帧上限均为 1 MiB；管理 POST 请求体上限 1 KiB、读取时限 5 秒。业务响应因历史字段别名可能超过输入大小，内部响应及写缓冲上限设为 16 MiB。
-- 最多 128 个活动 WebSocket；每连接收发队列各 64 项，内部等待请求最多 64 项。慢客户端发送超时后断开，不静默丢弃设备通知。
-- RPC、状态读取、设备选择、密码清理和监测共用原来的串行设备队列。保留硬件和 PIN 操作原有超时，不增加会让排队私钥操作在超时回复后继续执行的独立 RPC 等待超时。
-- `/status` 最多等待 3 秒；期间设备队列被密码弹窗等长任务占用时，直接返回最近一次成功读取的状态并附带 `stale: true`，不把"等待密码输入"误报成设备断开。并发请求合并为一次后台扫描，HTTP 等待结束后后台仍收集完整结果并更新快照。
-- `/selection` 与 `/pin-cache/clear` 排队上限 10 秒，尚未开始就超时的请求返回 503。worker 执行前通过私有 `controlId` 消息向 transport 确认请求仍有效；确认与超时在同一锁下处理，已过期的任务不得执行。获准开始后等待操作真实结果，沿用硬件/钥匙串自身的超时。Swift 两个控制接口的 curl 等待上限为 150 秒、进程上限为 155 秒，覆盖排队及最长 120 秒的钥匙串交互。
-- 设备枚举结果缓存 1 秒，同一次网站操作（列证书、取属性、签名）不再重复调用探测工具；`/status`、`/selection` 与监测扫描始终强制重新枚举。
-- 设备监测的 1 秒扫描只在存在 `MonitorDevice` 订阅时运行，订阅建立时先取一次基线；没有页面监听设备时不产生任何硬件轮询。
-- 断连时撤销订阅并跳过尚未执行的该连接 RPC；已经进入硬件操作的请求可能完成，不会自动重试或重放。
-- worker 异常退出或私有通道中断时，Rust 服务退出；Rust 正常退出时终止并回收 worker。应用父进程消失也会触发退出。
-- worker 启动时校验 fd 3 是父进程创建的已连接 Unix 套接字；参数传错会直接报“私有通道不可用”，而不是运行后给出一串 `Bad file descriptor`。
-- `--log` 指定的审计日志在整个进程内复用一个追加句柄，权限只在创建时收紧为 `0600`。transport（及它启动的 worker）的标准输出与标准错误由应用写入 `~/Library/Logs/广东电力USBKey助手/transport.log`，超过 1 MB 时清空重写，启动失败原因和监听地址因此可查。
+## 硬件与认证
 
-### 排障开关：证书筛选条件
+只允许固定探测、证书、PIN 状态、签名和解密操作，逐项校验设备标识和输入格式。只读工具上限 10 秒，签名/解密 15 秒，系统密码弹窗 120 秒；stdout 上限 1 MiB，PIN 状态 stdout 与 stderr 上限 64 KiB。并行读取 stdout/stderr，超限或超时终止进程组并等待回收；正常回收后不再向旧进程号发信号。执行器队列容量 64，保留 C 工具跨进程锁。
 
-在日志目录创建空文件 `.capture-certificate-selector-once` 后，若网页请求的 `SignedDataSelect` 因筛选条件不被支持而被拒绝，worker 会把该请求的 `type` 与 `condition` 写入同目录的 `rejected-certificate-selector.json`，然后删除标记文件，即只采集一次。单值超过 4 KiB 时只记录类型和长度；不写证书内容。标记文件不存在时不产生任何额外写入，因此可以安全地留在发行版里。
+Rust 管理 60 秒短期缓存、5 分钟认证租约及设备/证书集合绑定。每次认证创建令牌和状态代次；设备切换、拔插、证书集合变化、读取失败或主动清除会撤销旧代次。启动硬件前在同一状态锁下复核令牌、设备和 PIN，每个令牌最多进行一次无 PIN 解密和一次携带 PIN 的操作，仅明确返回需要认证时允许后者。
 
-## 第二阶段：硬件进程执行
+业务操作及公钥自检全部成功后才提交租约或保存密码；错误 PIN 保留剩余次数映射，不重试。未收尾令牌超过 10 分钟清除。`ClearPwdCache` 只清短期缓存并保留有效租约；应用中的清除保存密码操作还会撤销租约并清空钥匙串记录。Swift `pin-store-v1` 协议与证书集合账号算法保持不变。
 
-- 枚举、证书读取、PIN 状态查询、签名以及 RSA 解密的辅助程序调用，在 Rust 模式下一律交给 Rust 执行；失败不回退到 Node，也不自动重试。
-- 只允许启动本地配置的 `--probe` 和 `--signer`，并逐项校验操作、设备标识和标准输入格式。不提供任意命令执行接口。
-- 只读操作上限 10 秒，签名/解密上限 15 秒；stdout 上限 1 MiB，PIN 状态查询上限 64 KiB，stderr 上限 64 KiB。超限或超时立即终止并等待回收。
-- 同时读取 stdout/stderr，避免管道阻塞；仅把 stderr 字节数返回业务层，不传回原始错误输出。清空继承环境，只保留固定系统 PATH。
-- Rust 执行器使用容量为 64 的串行队列，保留 C 工具已有跨进程锁；Node 的共享业务队列继续保证完整 RPC/PIN 会话操作之间的顺序。
-- 每个硬件工具使用独立进程组。超时、取消、服务关闭或 worker 崩溃时整组终止；工具已正常回收后不再向该进程组发信号，避免命中已被复用的进程号。主进程协调停止执行器并等待活动工具回收。
-- C 工具非零退出时保留其 JSON 业务结果，沿用 PIN 剩余次数和错误码映射；例如 `63C2` 仍返回 `result: -5`、剩余 2 次。
+CMS 使用静态链接 OpenSSL 完成基础密码运算，保留兼容 ASN.1 编码：SHA-1/SHA-256、无 signedAttrs、仅叶证书、issuerAndSerialNumber，以及默认 rsaEncryption OID 的差别。`includeCertOption` 接受 0～3 并保持既有叶证书行为，不代表原厂所有选项语义。
 
-## 第三阶段：PIN 会话状态
-
-- Rust 持有 60 秒短期缓存、5 分钟认证租约及当前设备/证书集合绑定；Node 不保留跨请求 PIN 缓存。Rust 使用单调时钟判定过期，并每秒清理闲置的过期缓存。
-- 每次认证创建独立令牌和状态代次。弹窗、钥匙串及硬件调用返回后都检查令牌；设备切换、拔插、证书集合变化、读取失败或主动清除会撤销旧代次并清除缓存。
-- 只有业务回调完整成功（包括原有公钥自检）后才提交租约。失败按原绑定删除已尝试的保存密码，不重试；过期请求的结束处理不会撤销新设备的会话。
-- 硬件执行器在同一状态锁下复核令牌、设备及 PIN 并启动工具。一个令牌最多启动一次无 PIN 解密尝试和一次携带 PIN 的操作；仅业务明确返回需要认证时才协调 PIN 回退，失效、跨设备及重复调用不启动工具。
-- `ClearPwdCache` 继续只清短期缓存，保留有效认证租约；应用的“清除已保存的证书密码”同时撤销租约并清空钥匙串记录。
-- 弹窗由 Rust 调用 `osascript` 显示系统对话框（标题“广东电力USBKey助手”，仅该工具保留 `HOME`）；同一状态代次的并发调用合并弹窗。钥匙串读写及证书集合账号派生保留原实现，以复用已保存密码。
-- 未收尾的认证令牌超过 10 分钟自动清除（连同其中的 PIN 缓冲），最长合法流程远低于该上限；因此反复失败或中断不会把 64 条令牌上限耗尽后只能重启服务。
-- 状态消息与设备控制消息按私有 IPC 顺序处理；状态通道不可用时退出，不回退到 JavaScript 缓存。活动事务最多 64 项，关闭时清理全部状态。
-
-## 本地构建与运行
-
-需要 Rust/Cargo；本轮使用 Rust 1.99.0 验证，依赖版本保存在 `rust-transport/Cargo.lock`。默认从 `~/.cargo/bin/cargo` 调用，可通过 `CARGO=/其他路径/cargo` 指定。
+## 构建和测试
 
 ```sh
-make test-rust-transport
-make rust-transport
+SKIP_PACKAGE=1 make app
+make test
+make test-assistant-layout
+make tls
+make bridge
 ```
 
-已准备本地 TLS 证书后，关闭占用同一端口的助手或旧桥，再运行：
+构建需要 Xcode 命令行工具及 Rust/Cargo，不需要 Python 或 Node。发布工具由 `scripts/ProjectTools.swift` 提供，`scripts/project-tool.sh` 按需编译到 `build/tools/`，用于依赖许可、包结构检查、版本选择及增量补丁。依赖锁定于 `rust-transport/Cargo.lock`，默认使用 `~/.cargo/bin/cargo`，可通过 `CARGO` 指定。
 
-```sh
-make bridge-rust
-```
+开发端到端测试仍需 Node 作为 TLS/WebSocket 测试客户端；硬件桩用 Swift 编译，Rust 进程单元测试使用系统 shell。旧 JavaScript 后端已删除，兼容性对照使用 `tests/fixtures/legacy-compatibility.json` 的固定证书、CMS 和信封样本，并与系统 OpenSSL 交叉解密；其中私钥仅用于离线测试。测试不读取真实钥匙串。`make test-pin-store` 是单独的真实钥匙串测试，只使用随机测试服务名。
 
-该命令会正常枚举设备。手动使用时的钥匙串通道与原 `make bridge` 一样，需要主应用提供；测试不会读取真实钥匙串。
-
-需要使用其他端口或路径时，直接运行二进制，参数必须按 `--名称 值` 成对提供：
+独立 `make bridge` 会枚举实物；未接入 Swift 管道时不能保存钥匙串密码。手动指定路径示例：
 
 ```sh
 rust-transport/target/release/usbkey-transport \
-  --node "$(command -v node)" \
-  --worker "$PWD/server/transport-worker.mjs" \
+  --native-worker "$PWD/rust-transport/target/release/usbkey-worker" \
+  --probe "$PWD/build/ft3000gm-hid-probe" \
+  --signer "$PWD/build/ft3000gm-signer" \
   --port 20443 \
   --cert "$PWD/.local/tls/localhost.crt" \
   --key "$PWD/.local/tls/localhost.key"
 ```
 
-可选的 `--probe`、`--signer`、`--trust-store`、`--log` 沿用现有路径含义。`--parent-pid` 用于跟踪主应用。
+可选 `--trust-store`、`--log` 指定信任库和审计路径，`--parent-pid` 跟踪主应用。构建检查包内架构、系统动态库依赖、许可，以及不存在 Python/Node/JavaScript 运行文件；构建不会安装或发布应用。
 
-## 可选应用构建
+## 排障与验证边界
 
-```sh
-USE_RUST_TRANSPORT=1 SKIP_PACKAGE=1 make app
-```
+日志目录为 `~/Library/Logs/广东电力USBKey助手/`。审计采用脱敏字段；transport 标准输出与错误由应用写入 `transport.log`，超过 1 MB 时清空重写。
 
-构建脚本为 Apple 芯片目标编译 Rust，设置 macOS 12 部署目标，并把二进制放入应用资源。主应用仅在包内存在 Rust 二进制和 worker 时使用此入口；普通构建保持原入口。此选项仍包含 Node，未调整应用版本或发布 Release。
+在日志目录放置 `.capture-certificate-selector-once` 后，被拒绝的证书筛选可一次性记录 `type` 和 `condition` 到 `rejected-certificate-selector.json`，随后删除标记；超过 4 KiB 的单值只记类型和长度，不记证书内容。
 
-## 第一阶段验证（2026-10-21）
-
-- `make test-rust-transport`：临时 TLS 证书和独立端口下验证 HTTP 接口、Origin/子协议拒绝、跨连接串行执行、错误恢复、分片、Ping/Pong、关闭握手、非法帧、消息大小限制、超过 4 MiB 的响应、设备通知、模拟 PIN 私有管道、断连及 worker 崩溃退出。
-- 同一测试使用真实 `transport-worker.mjs` 入口及空设备探测桩验证状态与版本 RPC，并验证 SIGTERM 正常退出。
-- `make test`：现有检查通过。其中 USB/PCSC 探测属于枚举检查；其余离线用例不代表实物 PIN 或网站验证。
-- `make test-assistant-layout`：包含 Swift 启动入口修改的应用源码编译与布局检查通过。
-- Rust 优化构建及 Clippy 严格检查通过；Apple 芯片优化二进制约 2.5 MiB，Mach-O 部署目标确认为 macOS 12.0，同一集成测试也已对该二进制运行通过。
-
-本轮没有进行真实钥匙串读写、实物 PIN/签名/解密、目标网站复测、完整安装包升级或 macOS 12 实机验证。默认发布入口尚未切换。
-
-## 第二阶段验证（2026-10-22）
-
-- `make test-rust-transport` 现同时运行 Rust 单元测试与端到端集成测试。8 项 Rust 进程测试通过，覆盖操作白名单、同时读取双管道、非零业务结果、stdout/stderr 超限、超时回收、停止时取消、启动/编码失败及串行队列故障恢复。
-- 集成测试用临时 Python 硬件桩验证枚举、证书读取、PIN 状态和签名，确认硬件桩的父进程为 Rust、继承环境不含钥匙串标记、PIN 不进入参数或审计日志、PIN 错误只执行一次。
-- 强制终止业务 worker 时，仍在运行的硬件桩随 Rust 协调退出而终止，并在 Rust 退出前完成回收。
-- `make test` 原有检查及 Clippy 全目标严格检查通过。
-- Apple 芯片优化构建通过，Mach-O 部署目标保持 macOS 12.0；同一端到端测试已对该优化二进制运行通过。
-
-这些验证均使用离线桩或原有离线测试；未进行实物 PIN/签名/解密、真实钥匙串、目标网站或安装升级验证，默认应用入口仍未切换。
-
-## 第三阶段验证（2026-10-22）
-
-- 新增 9 项 Rust PIN 状态测试：租约提交、逻辑时间过期、缓存清除、绑定撤销、旧事务隔离、失败清理、PIN 格式、单次硬件授权、无 PIN 回退、事务上限及关闭清理。与已有进程测试合计 17 项。
-- 端到端测试使用真实 Rust 状态通道及模拟的 Swift 钥匙串协议，验证缓存复用、按证书集合保存/移除、错误单次尝试、主动清除、设备失效、无 PIN 成功及认证回退、并发弹窗合并、取消及钥匙串不可用。
-- 硬件桩验证重复 PIN 操作只启动一次，已经撤销的令牌和设备不匹配的请求均不会启动工具。
-- 进程超时用例的测试等待由 500 毫秒放宽到 3 秒，以容纳 Python 测试桩启动时间；生产 10/15 秒超时未改变。
-- 原有 `make test`、Clippy 全目标严格检查、本机及 Apple 芯片优化构建通过；端到端测试已对 macOS 12.0 部署目标的 Apple 芯片优化二进制运行通过。
-
-未进行实物 PIN/签名/解密、真实钥匙串、目标网站、安装升级或 macOS 12 实机验证。
+离线测试覆盖网络限制、状态期限、证书字段/筛选、12 组 CMS 字节对照、AES-128/256 互操作、PIN 单次错误与租约、多设备及拔插通知、断线/退出清理。macOS 12.0 是构建部署目标，不能据此声称已在 macOS 12 实机复测；实物 PIN/签名/解密、真实钥匙串及目标网站应单独记录验证结果。

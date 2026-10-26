@@ -155,8 +155,8 @@ enum AssistantUpdateInstallTests {
             try fileManager.setAttributes([.posixPermissions: mode], ofItemAtPath: helper.path)
         }
         let builder = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-            .appendingPathComponent("scripts/build_patch.py")
-        _ = run("/usr/bin/python3", [builder.path, "--from", target.path, "--app", next.path,
+            .appendingPathComponent("scripts/project-tool.sh")
+        _ = run("/bin/sh", [builder.path, "patch", "--from", target.path, "--app", next.path,
                                     "--out", work.path, "--force"])
         let patch = work.appendingPathComponent("USBKeyAssistant-1.1.20-patch-from-1.1.19.tar.gz")
         let patchPlan = UpdatePlan(kind: .patch,

@@ -53,7 +53,7 @@ COMMON_CFLAGS="-std=c11 -O2 -Wall -Wextra -Wpedantic -mmacosx-version-min=$MIN_V
 /usr/bin/install -m 755 "$PROJECT_DIR/rust-transport/target/aarch64-apple-darwin/release/usbkey-worker" "$RESOURCES/bin/usbkey-worker"
 "${CARGO:-$HOME/.cargo/bin/cargo}" metadata --locked --format-version 1 --filter-platform aarch64-apple-darwin \
   --manifest-path "$PROJECT_DIR/rust-transport/Cargo.toml" > "$UNIVERSAL_DIR/rust-metadata.json"
-/usr/bin/python3 "$SCRIPT_DIR/collect_rust_notices.py" "$UNIVERSAL_DIR/rust-metadata.json" \
+/bin/sh "$SCRIPT_DIR/project-tool.sh" notices "$UNIVERSAL_DIR/rust-metadata.json" \
   "$RESOURCES/THIRD_PARTY_NOTICES.txt" --sysroot "$("${RUSTC:-$HOME/.cargo/bin/rustc}" --print sysroot)"
 /usr/bin/install -m 755 "$PROJECT_DIR/packaging/uninstall.sh" "$RESOURCES/uninstall.sh"
 ICONSET="$UNIVERSAL_DIR/AppIcon.iconset"
@@ -84,7 +84,7 @@ done
 SIGN_IDENTITY=${APP_SIGN_IDENTITY:--}
 /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
-/usr/bin/python3 "$SCRIPT_DIR/check_native_bundle.py" "$APP_BUNDLE"
+/bin/sh "$SCRIPT_DIR/project-tool.sh" check-bundle "$APP_BUNDLE"
 if [ "${SKIP_PACKAGE:-0}" = 1 ]; then
   echo "Application: $APP_BUNDLE"
   exit 0

@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, copyFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { connect } from 'node:tls';
 import { request as httpsRequest } from 'node:https';
 import { once } from 'node:events';
-import { randomBytes, sign, X509Certificate } from 'node:crypto';
-import { certificateObject } from '../server/certificates.mjs';
-import { buildNetcaLegacyDetachedCms, buildAesCbcEnvelopedData } from '../server/cms.mjs';
+import { randomBytes } from 'node:crypto';
+const fixture = JSON.parse(readFileSync('tests/fixtures/legacy-compatibility.json'));
 
 const temp=mkdtempSync(join(tmpdir(),'native-backend-'));
 const bin=resolve(process.env.RUST_BIN_DIR??'rust-transport/target/debug');
@@ -17,39 +16,15 @@ let child,socket,stderr='';
 const deadline=(p,ms=12000)=>new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('native backend test timeout')),ms);p.then(v=>{clearTimeout(timer);resolve(v)},e=>{clearTimeout(timer);reject(e)});});
 function masked(text){const payload=Buffer.from(text),mask=randomBytes(4);let header;if(payload.length<126)header=Buffer.from([129,128|payload.length]);else{header=Buffer.alloc(4);header[0]=129;header[1]=254;header.writeUInt16BE(payload.length,2);}for(let i=0;i<payload.length;i++)payload[i]^=mask[i%4];return Buffer.concat([header,mask,payload]);}
 try {
-  for(const [name,usage] of [['sign','digitalSignature'],['enc','keyEncipherment']]) {
-    execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-subj','/CN=NETCA Fixture Holder/O=Fixture Org','-addext',`keyUsage=${usage}`,'-addext','subjectKeyIdentifier=hash','-days','30','-keyout',join(temp,`${name}.key`),'-out',join(temp,`${name}.crt`)],{stdio:'ignore'});
-    execFileSync('/usr/bin/openssl',['x509','-in',join(temp,`${name}.crt`),'-outform','DER','-out',join(temp,`${name}.der`)]);
+  for(const name of ['sign','enc']) {
+    for(const [suffix,value] of [['key',fixture.certificates[name].key],['crt',fixture.certificates[name].pem]]) writeFileSync(join(temp,name+'.'+suffix),value);
+    writeFileSync(join(temp,name+'.der'),Buffer.from(fixture.certificates[name].der,'base64'));
   }
   execFileSync('/usr/bin/openssl',['req','-x509','-newkey','rsa:2048','-nodes','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost,IP:127.0.0.1','-days','1','-keyout',join(temp,'tls.key'),'-out',join(temp,'tls.crt')],{stdio:'ignore'});
   const signDer=readFileSync(join(temp,'sign.der')),encDer=readFileSync(join(temp,'enc.der'));
   let state={devices:['a1'],mode:'success',sign:signDer.toString('base64'),enc:encDer.toString('base64')};
   const save=changes=>{state={...state,...changes};writeFileSync(config,JSON.stringify(state));};save({});
-  const helper=join(temp,'helper.py');
-  writeFileSync(helper,`#!/usr/bin/python3
-import json,sys,os,subprocess,base64,time
-s=json.load(open(${JSON.stringify(config)}));op=sys.argv[1];device=sys.argv[3] if len(sys.argv)>3 else 'a1'
-lines=sys.stdin.read().splitlines()
-with open(${JSON.stringify(helperLog)},'a') as log:log.write(json.dumps({'pid':os.getpid(),'parent':os.getppid(),'op':op,'device':device,'lines':len(lines)})+'\\n')
-if s['mode']=='hang' and op=='--sign-digest-info':time.sleep(60)
-if s['mode']=='slow' and op=='--sign-digest-info':time.sleep(5)
-if op=='--list-devices':out={'devices':[{'device_id':d,'device_type':47} for d in s['devices']]}
-elif op=='--include-certificate':out={'device_found':True,'device_id':device,'device_type':47,'certificate_count':2,'certificate_file_ids':'3001;3002','container_diagnostics':'0:1240010101300109023002','certificates':[{'file_id':'3001','encode':s['sign']},{'file_id':'3002','encode':s['enc']}]}
-elif op=='--pin-status':out={'retries':5}
-else:
-    needs=op!='--decrypt-rsa-block-no-pin'
-    if needs and (s['mode']=='badpin' or not lines or lines[0]!='fixture-pin'):
-        print(json.dumps({'pin_verified':False,'verify_sw':'63C2','retries':2}));sys.exit(4)
-    data=base64.b64decode(lines[-1])
-    if op=='--sign-digest-info':
-        value=subprocess.check_output(['/usr/bin/openssl','rsautl','-sign','-inkey',${JSON.stringify(join(temp,'sign.key'))}],input=data,stderr=subprocess.DEVNULL)
-        if s['mode']=='badSignature':value=b'\\0'*256
-        out={'signed':True,'signature_base64':base64.b64encode(value).decode()}
-    else:
-        value=subprocess.check_output(['/usr/bin/openssl','rsautl','-decrypt','-raw','-inkey',${JSON.stringify(join(temp,'enc.key'))}],input=data,stderr=subprocess.DEVNULL)
-        out={'decrypted':True,'rsa_block_base64':base64.b64encode(value).decode()}
-print(json.dumps(out))
-`);chmodSync(helper,0o700);
+  const helper=join(temp,'helper');copyFileSync(resolve('build/test-device-helper'),helper);chmodSync(helper,0o700);
   child=spawn(join(bin,'usbkey-transport'),['--port','0','--cert',join(temp,'tls.crt'),'--key',join(temp,'tls.key'),'--native-worker',join(bin,'usbkey-worker'),'--probe',helper,'--signer',helper,'--log',join(temp,'audit.log')],{env:{...process.env,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',USBKEY_PRIVATE_PIN_CHANNEL:'1'},stdio:['pipe','pipe','pipe']});
   const stored=new Map();let privateBuffer='';
   child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{privateBuffer+=chunk;while(privateBuffer.includes('\n')){const end=privateBuffer.indexOf('\n'),line=privateBuffer.slice(0,end);privateBuffer=privateBuffer.slice(end+1);const req=JSON.parse(line);assert.equal(req.privateChannel,'pin-store-v1');let status=0,pin;
@@ -75,7 +50,7 @@ print(json.dumps(out))
   assert.equal((await ok('GetVersionInfo1')).version,'macOS-ft3000gm-1.1.15');
   assert.equal((await ok('IsInsertKey')).insertCount,1);
   const list=await ok('GetCertList');assert.equal(list.certCount,2);assert.deepEqual(list.certInfo,list.certList);
-  for(const record of list.certInfo){const der=record.fileId==='3001'?signDer:encDer;for(const [key,value]of Object.entries(certificateObject(der)))assert.deepEqual(record[key],value,`certificate field ${key}`);}
+  for(const record of list.certInfo){for(const [key,value]of Object.entries(fixture.certificates[record.fileId==='3001'?'sign':'enc'].fields))assert.deepEqual(record[key],value,`certificate field ${key}`);}
   assert.equal((await ok('GetCertList',{type:1})).certInfo[0].fileId,'3002');assert.equal((await ok('GetCertList',{type:2})).certInfo[0].fileId,'3001');
   const portal=JSON.parse(readFileSync('tests/fixtures/portal-certificate-selector.json'));
   assert.equal((await ok('GetCertStringAttribute',{id:-1,cert:portal})).certCode,signDer.toString('base64'));
@@ -85,27 +60,24 @@ print(json.dumps(out))
   assert.equal(existsSync(join(temp,'.capture-certificate-selector-once')),false);
   assert.equal(readFileSync(join(temp,'rejected-certificate-selector.json'),'utf8').includes(signDer.toString('base64')),false);
   for(const condition of ["IssuerCN~'OtherCA' && CertType='Signature'","IssuerCN~'NETCA' || CertType='Signature'","CertType~'Sign'","Unknown='x'"]){assert.notEqual((await rpc('GetCertStringAttribute',{id:-1,cert:{type:'device',condition}})).responseResult.status,0);}
-  const content=Buffer.from('native 兼容签名 -50,277,281,287,400');
+  const content=Buffer.from(fixture.content,'base64');
   for(const algorithm of [undefined,2,4])for(const includeCertOption of [0,1,2,3]) {
     const entity=await ok('SignedDataSign',{...(algorithm===undefined?{}:{algo:algorithm}),detached:1,includeCertOption,certPwd:'fixture-pin',data:{text:content.toString('base64')}});
-    const digest=algorithm===4?'sha256':'sha1';const signature=sign(algorithm===4?'RSA-SHA256':'RSA-SHA1',content,readFileSync(join(temp,'sign.key')));
-    const oid=algorithm===undefined?'1.2.840.113549.1.1.1':algorithm===4?'1.2.840.113549.1.1.11':'1.2.840.113549.1.1.5';
-    assert.equal(entity.signValue,buildNetcaLegacyDetachedCms(signDer,signature,digest,oid).toString('base64'),'CMS must match legacy bytes exactly');assert.equal(entity.signedData,entity.signValue);
+    assert.equal(entity.signValue,fixture.cms[algorithm??'default'],'CMS must match frozen legacy bytes exactly');assert.equal(entity.signedData,entity.signValue);
   }
   assert.equal(stored.size,1);await ok('ClearPwdCache');
   assert.ok((await ok('SignedDataSign',{algo:4,detached:1,data:{text:content.toString('base64')}})).signValue,'cached lease must work without prompting');
-  const encCert=new X509Certificate(encDer);
   for(const algo of [-1,0,4,6]) {
     const encrypted=await ok('EnvelopedDataEncrypt',{algo,cert:algo===-1?{encode:encDer.toString('base64')}:{type:'device',condition:"CertType='Encrypt'"},data:{text:content.toString('base64')}});
     const envelope=Buffer.from(encrypted.encryptValue,'base64');writeFileSync(join(temp,'envelope.der'),envelope);
     const clear=execFileSync('/usr/bin/openssl',['cms','-decrypt','-inform','DER','-in',join(temp,'envelope.der'),'-inkey',join(temp,'enc.key'),'-recip',join(temp,'enc.crt')]);assert.deepEqual(clear,content);
     const decrypted=await ok('EnvelopedDataDecrypt',{encData:encrypted.encryptValue});assert.deepEqual(Buffer.from(decrypted.clearValue,'base64'),content);assert.equal(decrypted.clearEncodeType,'base64');
-    const nodeEnvelope=buildAesCbcEnvelopedData(encCert,content,algo===6?256:128).toString('base64');
+    const nodeEnvelope=fixture.envelopes[algo===6?256:128];
     assert.deepEqual(Buffer.from((await ok('EnvelopedDataDecrypt',{encData:nodeEnvelope})).clearValue,'base64'),content);
   }
   await http('/pin-cache/clear','POST','',{'Content-Type':'application/json'});assert.equal(stored.size,0);
-  const noPinEnvelope=buildAesCbcEnvelopedData(encCert,content,128).toString('base64');assert.deepEqual(Buffer.from((await ok('EnvelopedDataDecrypt',{encData:noPinEnvelope})).clearValue,'base64'),content);assert.equal(stored.size,0);
-  let logs=()=>readFileSync(helperLog,'utf8').trim().split('\n').map(JSON.parse);
+  const noPinEnvelope=fixture.envelopes[128];assert.deepEqual(Buffer.from((await ok('EnvelopedDataDecrypt',{encData:noPinEnvelope})).clearValue,'base64'),content);assert.equal(stored.size,0);
+  let logs=()=>readFileSync(helperLog,'utf8').trim().split('\n').map(JSON.parse).filter(x=>x.event==='start');
   save({mode:'badpin'});const before=logs().filter(x=>x.op==='--sign-digest-info').length;
   const rejected=await ok('SignedDataSign',{algo:4,detached:1,certPwd:'fixture-pin',data:{text:content.toString('base64')}});assert.deepEqual(rejected,{result:-5,retrynum:2});assert.equal(logs().filter(x=>x.op==='--sign-digest-info').length,before+1);
   save({mode:'badSignature'});assert.notEqual((await rpc('SignedDataSign',{algo:4,detached:1,certPwd:'fixture-pin',data:{text:content.toString('base64')}})).responseResult.status,0);assert.equal(stored.size,0);
@@ -139,6 +111,6 @@ print(json.dumps(out))
   await new Promise(r=>setTimeout(r,2000));
   assert.equal(logs().filter(x=>x.op==='--list-devices').length,idleProbes,'device scans continue without a subscriber');
   child.kill('SIGTERM');await deadline(once(child,'exit'));assert.equal(child.exitCode,0);assert.throws(()=>process.kill(workerPid,0),{code:'ESRCH'});
-  console.log('Node-free native RPC, certificate fields/selectors, byte-identical CMS, OpenSSL/Node envelope interoperability, PIN error/lease compatibility, monitor and shutdown tests PASSED');
+  console.log('Node-free native RPC, certificate fields/selectors, byte-identical CMS, OpenSSL/frozen legacy envelope interoperability, PIN error/lease compatibility, monitor and shutdown tests PASSED');
 }catch(error){throw new Error(`${error.message}\nNative diagnostics:\n${stderr}`,{cause:error});}
 finally{socket?.destroy();if(child&&child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await deadline(once(child,'exit'),3000).catch(()=>child.kill('SIGKILL'));}rmSync(temp,{recursive:true,force:true});}

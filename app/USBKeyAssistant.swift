@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var loginButton: NSButton!
     private var diagnosticButton: NSButton!
     private var mainStack: NSStackView!
+    private var contentSpacer: NSView!
     private var statusBadgeLabel: NSTextField!
     private var statusBadge: AssistantSurface!
     private var detailLabel: NSTextField!
@@ -369,29 +370,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         tools.spacing = 12
         tools.alignment = .centerY
         let footerRule = AssistantTheme.divider()
-        let cardContents = AssistantTheme.vertical([
-            connection, rule, devicePickerRow, organization, identity, footerRule, tools,
-        ], spacing: 20)
-        cardContents.setCustomSpacing(24, after: organization)
-        let card = AssistantSurface()
-        card.contain(cardContents, inset: 22)
-        for view in [connection, rule, devicePickerRow!, organization, identity, footerRule, tools] {
-            view.widthAnchor.constraint(equalTo: cardContents.widthAnchor).isActive = true
-        }
         detailLabel = AssistantTheme.label("", size: 12, color: AssistantTheme.muted)
         detailLabel.maximumNumberOfLines = 0
         detailLabel.isHidden = true
-        mainStack = AssistantTheme.vertical([card, detailLabel], spacing: 12)
+        contentSpacer = NSView()
+        contentSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        contentSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        contentSpacer.heightAnchor.constraint(greaterThanOrEqualToConstant: 0).isActive = true
+        mainStack = AssistantTheme.vertical([
+            connection, rule, devicePickerRow, organization, identity, contentSpacer, footerRule, tools, detailLabel,
+        ], spacing: 20)
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(mainStack)
         NSLayoutConstraint.activate([
             mainStack.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 36),
             mainStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -36),
-            mainStack.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: 54),
-            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -32),
-            mainStack.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            mainStack.topAnchor.constraint(equalTo: content.topAnchor, constant: 54),
+            mainStack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -32),
         ])
-        for view in [card, detailLabel!] {
+        for view in mainStack.views {
             view.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
         }
         resizeWindowToFit()
@@ -695,7 +692,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         screenSize = screenSizeForTesting ?? screenSize
         #endif
         let ratio = screenSize.width / screenSize.height
-        let minimumContentSize = NSSize(width: 840, height: max(420, mainStack.fittingSize.height + 86))
+        // Measure the rows, excluding the flexible gap, so a full-height layout
+        // cannot feed its expanded height back into the next window resize.
+        let rows = mainStack.views.filter { !$0.isHidden }
+        let rowsHeight = rows.filter { $0 !== contentSpacer }.reduce(CGFloat(0)) { $0 + $1.fittingSize.height }
+        let minimumHeight = rowsHeight + CGFloat(max(0, rows.count - 1)) * mainStack.spacing + 86
+        let minimumContentSize = NSSize(width: 840, height: max(420, minimumHeight))
         let minimumFrame = window.frameRect(forContentRect: NSRect(origin: .zero, size: minimumContentSize))
         let height = max(minimumFrame.height, minimumFrame.width / ratio)
         var frame = window.frame
@@ -885,6 +887,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             resizeWindowToFit()
             window.contentView?.layoutSubtreeIfNeeded()
             guard let content = window.contentView else { preconditionFailure("Missing content view") }
+            let mainFrame = mainStack.convert(mainStack.bounds, to: content)
+            precondition(abs(content.bounds.maxY - mainFrame.maxY - 54) < 1 && abs(mainFrame.minY - 32) < 1,
+                         "Device information must fill the workspace from header to footer")
+            let loginFrame = loginButton.convert(loginButton.bounds, to: content)
+            precondition(abs(loginFrame.minY - 32) < 1, "Website action must stay at the bottom of the workspace")
             if let screen = window.screen ?? NSScreen.main {
                 precondition(abs(window.frame.width / window.frame.height - screen.frame.width / screen.frame.height) < 0.005,
                              "Window proportions must match the current screen")

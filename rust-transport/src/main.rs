@@ -407,15 +407,13 @@ async fn main() -> Result<()> {
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
     let server = axum_server::from_tcp_rustls(listener, tls)?;
-    let node = options.get("--node").copied();
-    let worker_path = if node.is_some() {
-        PathBuf::from(required("--worker")?)
-    } else {
-        options
-            .get("--native-worker")
-            .map(PathBuf::from)
-            .unwrap_or(std::env::current_exe()?.with_file_name("usbkey-worker"))
-    };
+    if options.contains_key("--node") || options.contains_key("--worker") {
+        bail!("legacy JavaScript workers are no longer supported");
+    }
+    let worker_path = options
+        .get("--native-worker")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_exe()?.with_file_name("usbkey-worker"));
     let root = worker_path
         .parent()
         .and_then(std::path::Path::parent)
@@ -433,13 +431,7 @@ async fn main() -> Result<()> {
     let (parent, child_socket) = std::os::unix::net::UnixStream::pair()?;
     parent.set_nonblocking(true)?;
     let child_fd = child_socket.as_raw_fd();
-    let mut command = Command::new(
-        node.map(PathBuf::from)
-            .unwrap_or_else(|| worker_path.clone()),
-    );
-    if node.is_some() {
-        command.arg(&worker_path);
-    }
+    let mut command = Command::new(&worker_path);
     command
         .args(&args)
         .env("USBKEY_RUST_WORKER", "1")

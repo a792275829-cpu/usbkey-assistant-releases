@@ -1,6 +1,6 @@
 # NETCA 浏览器协议记录
 
-2026-10-19源码新增认证、返回契约、设备通知和证书选择改进，详见 [实现与验证说明](2026-10-19_前四项兼容改进.md)。这部分新增行为尚未做实物PIN或网站复测。
+2026-10-19 源码新增认证、返回契约、设备通知和证书选择改进，历史记录见 [实现与验证说明](archive/2026-10-19_前四项兼容改进.md)。当前 Rust 架构和验证边界见 [Rust 后端](RUST_TRANSPORT.md)；下文实物及网站记录属于各自历史版本，不能作为本轮清理后的复测结果。
 
 ## 连接
 
@@ -80,7 +80,7 @@ WebSocket 子协议为 `crypto-jsonrpc-protocol`。
 
 ## 当前 macOS 桥
 
-`server/netca_readonly_bridge.mjs` 实现以下方法：
+Rust 后端 `rust-transport/src/native/rpc.rs` 实现以下方法：
 
 - `GetVersionInfo1`、`GetVersionInfo`、`GetClientVersionInfo`
 - `IsInsertKey`
